@@ -15,7 +15,7 @@ import { resolveAssistant } from "./assistant-config.js";
 import {
   refreshGuardianToken,
   guardianTokenDueForRenewal,
-} from "./guardian-token.js";
+} from "@mycadet/local-mode";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 

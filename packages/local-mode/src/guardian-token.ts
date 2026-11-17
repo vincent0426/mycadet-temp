@@ -1,7 +1,17 @@
-import { execSync, spawn } from "node:child_process";
+import { execSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { hostname, platform } from "node:os";
 import path from "node:path";
 import { dirname, join } from "node:path";
@@ -15,13 +25,11 @@ import {
   guardianTokenPath,
   resolveConfigDir,
 } from "./config";
-import type { LockfileAssistant } from "./lockfile-contract";
+import { getGatewayUrl, type LockfileAssistant } from "./lockfile-contract";
 import { readLockfile } from "./lockfile";
+import { loopbackSafeFetch } from "./loopback-fetch";
 import { pairDevice } from "./operations/pair";
-import type { CliInvocation } from "./util";
-import { resolveCliInvocation } from "./cli-invocation";
 
-const GUARDIAN_TOKEN_REFRESH_TIMEOUT_MS = 15_000;
 const guardianTokenRefreshes = new Map<string, Promise<TokenResult>>();
 
 import {
@@ -204,71 +212,6 @@ export type TokenResult =
   | { ok: true; accessToken: string }
   | { ok: false; status: number; error: string };
 
-/**
- * Prefix of the machine-readable line `cadet gateway token refresh` writes
- * to stderr on failure so hosts can distinguish a spent credential (401)
- * from an unreachable gateway (503) without scraping the human message.
- */
-const GUARDIAN_REFRESH_ERROR_PREFIX = "CADET_REFRESH_ERROR=";
-
-/** Encode a structured refresh failure for the CLI's stderr. */
-export function formatGuardianRefreshCliFailure(
-  status: number,
-  error: string,
-): string {
-  return `${GUARDIAN_REFRESH_ERROR_PREFIX}${JSON.stringify({ status, error })}`;
-}
-
-/**
- * Read the structured status out of a failed `cadet gateway token refresh`.
- * An unlabeled non-zero exit defaults to 503: this spawn only runs when the
- * on-disk refresh token is still unexpired, so a bare CLI failure is an
- * unreachable or still-starting gateway, not a spent credential.
- */
-export function parseGuardianRefreshCliFailure(
-  stdout: string,
-  stderr: string,
-): TokenResult {
-  const blob = `${stderr}\n${stdout}`;
-  for (const line of blob.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith(GUARDIAN_REFRESH_ERROR_PREFIX)) {
-      continue;
-    }
-    try {
-      const parsed: unknown = JSON.parse(
-        trimmed.slice(GUARDIAN_REFRESH_ERROR_PREFIX.length),
-      );
-      if (
-        parsed === null ||
-        typeof parsed !== "object" ||
-        !("status" in parsed) ||
-        typeof (parsed as { status: unknown }).status !== "number"
-      ) {
-        continue;
-      }
-      const status = (parsed as { status: number }).status;
-      if (status < 400 || status > 599) {
-        continue;
-      }
-      const errorText =
-        "error" in parsed &&
-        typeof (parsed as { error: unknown }).error === "string" &&
-        (parsed as { error: string }).error.trim() !== ""
-          ? (parsed as { error: string }).error
-          : "Failed to refresh guardian token";
-      return { ok: false, status, error: errorText };
-    } catch {
-      // Keep scanning; a later well-formed line still wins.
-    }
-  }
-  return {
-    ok: false,
-    status: 503,
-    error: "Failed to refresh guardian token",
-  };
-}
-
 /** The persisted shape of an assistant's guardian token file. */
 /**
  * The guardian access token for an assistant, from its xdg token file —
@@ -281,7 +224,6 @@ export function parseGuardianRefreshCliFailure(
 export async function getGuardianAccessToken(
   assistantId: string,
 ): Promise<TokenResult> {
-  const invocation = await resolveCliInvocation();
   if (isBasetenAssistant(assistantId)) {
     return Promise.resolve(readBasetenSandboxToken(assistantId));
   }
@@ -339,7 +281,7 @@ export async function getGuardianAccessToken(
   if (existingRefresh) {
     return existingRefresh;
   }
-  const refresh = refreshToken(assistantId, invocation).finally(() => {
+  const refresh = refreshToken(assistantId).finally(() => {
     if (guardianTokenRefreshes.get(tokenPath) === refresh) {
       guardianTokenRefreshes.delete(tokenPath);
     }
@@ -360,76 +302,20 @@ function isBasetenAssistant(assistantId: string): boolean {
   );
 }
 
-function refreshToken(
-  assistantId: string,
-  invocation: CliInvocation,
-): Promise<TokenResult> {
-  return new Promise((resolve) => {
-    const child = spawn(
-      invocation.command,
-      [...invocation.baseArgs, "gateway", "token", "refresh", assistantId],
-      {
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-        env: { ...process.env },
-      },
-    );
-
-    let stdout = "";
-    let stderr = "";
-    let done = false;
-
-    const finish = (result: TokenResult) => {
-      if (done) {
-        return;
-      }
-      done = true;
-      clearTimeout(timeout);
-      resolve(result);
-    };
-
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      finish({
-        ok: false,
-        status: 500,
-        error: "Guardian token refresh timed out",
-      });
-    }, GUARDIAN_TOKEN_REFRESH_TIMEOUT_MS);
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    child.on("close", (code) => {
-      if (code === 0) {
-        const accessToken = stdout.trim();
-        if (accessToken) {
-          finish({ ok: true, accessToken });
-        } else {
-          finish({ ok: false, status: 500, error: "CLI returned empty token" });
-        }
-      } else {
-        // This spawn only runs when the on-disk refresh token is still
-        // unexpired. A non-zero CLI exit is therefore a transport or
-        // gateway-availability failure unless the CLI labels a spent
-        // credential (401) or a local confidentiality refusal (403).
-        finish(parseGuardianRefreshCliFailure(stdout, stderr));
-      }
-    });
-
-    child.on("error", (err) => {
-      finish({
-        ok: false,
-        status: 500,
-        error: `Failed to spawn CLI: ${err.message}`,
-      });
-    });
-  });
+async function refreshToken(assistantId: string): Promise<TokenResult> {
+  const entry = readLockfile().assistants.find(
+    (a) => a.assistantId === assistantId,
+  );
+  if (!entry) {
+    return { ok: false, status: 404, error: "Assistant not found" };
+  }
+  const result = await refreshGuardianTokenResult(
+    getGatewayUrl(entry),
+    assistantId,
+  );
+  return result.ok
+    ? { ok: true, accessToken: result.token.accessToken }
+    : result;
 }
 
 // ─── The guardian-token lease ────────────────────────────────────────────
@@ -588,4 +474,331 @@ export async function leaseGuardianToken(
 
   saveGuardianToken(assistantId, tokenData);
   return tokenData;
+}
+
+// ─── Guardian-token refresh ──────────────────────────────────────────────
+
+/** Abort the refresh POST if the gateway is slow/unreachable (it's now on the
+ *  hot request path, so it must never hang indefinitely). */
+const REFRESH_FETCH_TIMEOUT_MS = 15_000;
+/** Max time to wait for the per-assistant refresh lock before proceeding. */
+const REFRESH_LOCK_WAIT_MS = 10_000;
+/** A lock older than this is treated as stale (holder crashed) and stolen. */
+const REFRESH_LOCK_STALE_MS = 30_000;
+const REFRESH_LOCK_POLL_MS = 100;
+
+function getRefreshLockPath(assistantId: string): string {
+  return join(dirname(guardianTokenPath(assistantId)), "refresh.lock");
+}
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Best-effort exclusive cross-process lock for a per-assistant token refresh.
+ * Created atomically with `wx`; a stale lock (crashed holder) is stolen.
+ * Returns true if acquired, false if it timed out (caller proceeds degraded).
+ */
+async function acquireRefreshLock(lockPath: string): Promise<boolean> {
+  mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + REFRESH_LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, "wx", 0o600);
+      writeSync(fd, String(process.pid));
+      closeSync(fd);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") return false;
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > REFRESH_LOCK_STALE_MS) {
+          unlinkSync(lockPath); // steal a stale lock, then retry
+          continue;
+        }
+      } catch {
+        continue; // lock vanished between open and stat — retry
+      }
+      if (Date.now() >= deadline) return false;
+      await delay(REFRESH_LOCK_POLL_MS);
+    }
+  }
+}
+
+function releaseRefreshLock(lockPath: string): void {
+  try {
+    unlinkSync(lockPath);
+  } catch {
+    /* already released/stolen */
+  }
+}
+
+/**
+ * True when a stored guardian token has reached its renewal point: now is
+ * at/after `refreshAfter` (preferred) or `accessTokenExpiresAt`. Used to gate
+ * refresh so a forged/synthetic 401 on a still-valid token can't coax out the
+ * long-lived refresh credential. Unparseable timestamps → not due.
+ */
+export function guardianTokenDueForRenewal(token: GuardianTokenData): boolean {
+  const raw = token.refreshAfter || token.accessTokenExpiresAt;
+  const at = new Date(raw).getTime();
+  if (!Number.isFinite(at)) {
+    return false;
+  }
+  return at <= Date.now();
+}
+
+export type GuardianTokenRefreshResult =
+  | { ok: true; token: GuardianTokenData }
+  | { ok: false; status: number; error: string };
+
+function failureChainText(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let i = 0; i < 4 && current; i++) {
+    if (current instanceof Error) {
+      parts.push(current.name, current.message);
+      if ("code" in current && current.code != null) {
+        parts.push(String(current.code));
+      }
+      current = current.cause;
+      continue;
+    }
+    if (current && typeof current === "object") {
+      const record = current as {
+        code?: unknown;
+        message?: unknown;
+        cause?: unknown;
+        name?: unknown;
+      };
+      if (record.name != null) {
+        parts.push(String(record.name));
+      }
+      if (record.message != null) {
+        parts.push(String(record.message));
+      }
+      if (record.code != null) {
+        parts.push(String(record.code));
+      }
+      current = record.cause;
+      continue;
+    }
+    break;
+  }
+  return parts.join(" ").toLowerCase();
+}
+
+function isTimeoutLikeError(error: unknown): boolean {
+  if (error instanceof Error) {
+    if (error.name === "TimeoutError" || error.name === "AbortError") {
+      return true;
+    }
+  }
+  const haystack = failureChainText(error);
+  return (
+    haystack.includes("timeout") ||
+    haystack.includes("etimedout") ||
+    haystack.includes("und_err_connect_timeout")
+  );
+}
+
+function isUnreachableGatewayError(error: unknown): boolean {
+  const haystack = failureChainText(error);
+  return (
+    haystack.includes("econnrefused") ||
+    haystack.includes("econnreset") ||
+    haystack.includes("enotfound") ||
+    haystack.includes("ehostunreach") ||
+    haystack.includes("enetunreach") ||
+    haystack.includes("und_err_socket") ||
+    haystack.includes("fetch failed") ||
+    haystack.includes("unable to connect") ||
+    haystack.includes("failed to connect")
+  );
+}
+
+function classifyRefreshThrownError(
+  error: unknown,
+): GuardianTokenRefreshResult {
+  // A malformed 200 body throws from parseGuardianToken: the gateway
+  // answered, so this is its contract that's broken — 502, not 500.
+  if (error instanceof GuardianLeasePermanentError) {
+    return {
+      ok: false,
+      status: 502,
+      error: "Assistant gateway returned a malformed token refresh response",
+    };
+  }
+  if (isTimeoutLikeError(error)) {
+    return {
+      ok: false,
+      status: 504,
+      error: "Guardian token refresh timed out",
+    };
+  }
+  if (isUnreachableGatewayError(error)) {
+    return {
+      ok: false,
+      status: 503,
+      error: "Assistant gateway is unreachable",
+    };
+  }
+  return {
+    ok: false,
+    status: 500,
+    error: "Failed to refresh guardian token",
+  };
+}
+
+function classifyRefreshHttpStatus(status: number): GuardianTokenRefreshResult {
+  // The guardian refresh route uses 403 for revoked, reused, or
+  // device-mismatched tokens. That is a spent credential, not a
+  // loopback-boundary refusal, so hosts treat it as 401.
+  if (status === 401 || status === 403) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Failed to refresh guardian token",
+    };
+  }
+  if (status >= 500) {
+    return {
+      ok: false,
+      status,
+      error: `Assistant gateway rejected the token refresh (${status})`,
+    };
+  }
+  return {
+    ok: false,
+    status,
+    error: `Assistant gateway rejected the token refresh (${status})`,
+  };
+}
+
+/**
+ * Call POST /v1/guardian/refresh on the remote gateway to obtain a new
+ * access token using an existing (possibly expired) access token for auth.
+ * Returns a structured result so hosts can tell a spent credential (401,
+ * including a refresh-endpoint 403 for revoked/reused/device-mismatched
+ * tokens) from an unreachable gateway (503) instead of collapsing both
+ * to null. 403 is reserved for a local confidentiality refusal (insecure
+ * URL). Loopback and paired-token refusals are also 403, and they are
+ * decided on the host before this refresh runs.
+ *
+ * Concurrency-safe: the gateway rotates refresh tokens and treats reuse of an
+ * already-rotated token as replay (revoking the whole token family), so two
+ * processes (e.g. `cadet message` + `cadet events`) refreshing the same
+ * stored token at once would self-revoke and force re-pairing. We serialize on
+ * a per-assistant lock and, once held, re-read the stored token: if another
+ * process already rotated it while we waited, we return that fresh token
+ * instead of replaying our now-stale refresh token.
+ */
+export async function refreshGuardianTokenResult(
+  gatewayUrl: string,
+  assistantId: string,
+): Promise<GuardianTokenRefreshResult> {
+  // Never send the long-lived refresh token over a non-loopback plaintext URL.
+  if (!isConfidentialRefreshUrl(gatewayUrl)) {
+    console.warn(
+      `Refusing to refresh the guardian token over an insecure URL (${gatewayUrl}). ` +
+        "The refresh token is only sent over https or a loopback address: " +
+        "use an https URL, e.g. a tunnel, or connect over loopback.",
+    );
+    return {
+      ok: false,
+      status: 403,
+      error: "Refusing to refresh the guardian token over an insecure URL",
+    };
+  }
+
+  const before = loadGuardianToken(assistantId);
+  if (!before) {
+    return {
+      ok: false,
+      status: 404,
+      error: "Guardian token not found",
+    };
+  }
+
+  // Gateway persists expiresAt as epoch-ms numbers; Date.parse("1234567890000")
+  // returns NaN. new Date() accepts both ISO strings and epoch-ms numbers.
+  const refreshExpiry = new Date(before.refreshTokenExpiresAt).getTime();
+  if (!Number.isFinite(refreshExpiry) || refreshExpiry <= Date.now()) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Guardian refresh token expired",
+    };
+  }
+
+  const lockPath = getRefreshLockPath(assistantId);
+  const locked = await acquireRefreshLock(lockPath);
+  try {
+    // Re-read under the lock: a concurrent process may have rotated the token
+    // while we waited. If the stored refresh token changed, ours is now stale
+    // (replaying it would trip reuse-detection). Use the fresh token instead.
+    const current = loadGuardianToken(assistantId);
+    if (current && current.refreshToken !== before.refreshToken) {
+      return { ok: true, token: current };
+    }
+
+    // We did NOT acquire the lock (another process is likely mid-refresh) and
+    // the stored token hasn't been rotated yet. Do NOT call the gateway: our
+    // refresh token may be the one the winner is rotating right now, and
+    // replaying a rotated token revokes the whole family (forcing re-pair).
+    // Surface a retryable failure so the next attempt can pick up the
+    // winner's persisted token.
+    if (!locked) {
+      return {
+        ok: false,
+        status: 503,
+        error: "Guardian token refresh is already in progress",
+      };
+    }
+
+    const tokenData = current ?? before;
+
+    const response = await loopbackSafeFetch(
+      `${gatewayUrl}/v1/guardian/refresh`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${tokenData.accessToken}`,
+        },
+        body: JSON.stringify({
+          refreshToken: tokenData.refreshToken,
+          // The refresh token is device-bound; send the device id used at init
+          // (falling back to a fresh computation for tokens persisted before the
+          // field was stored) so the gateway can verify the binding.
+          deviceId: tokenData.deviceId || computeDeviceId(),
+        }),
+        signal: AbortSignal.timeout(REFRESH_FETCH_TIMEOUT_MS),
+      },
+    );
+    if (!response.ok) {
+      return classifyRefreshHttpStatus(response.status);
+    }
+
+    // The refresh endpoint answers with the full guardian credential
+    // contract — the same shape the pairing mint emits — so one schema
+    // parses the credential from mint to rotation to token file. A
+    // malformed body throws and the surrounding catch classifies it.
+    const refreshed = parseGuardianToken(await response.json());
+    saveGuardianToken(assistantId, refreshed);
+    return { ok: true, token: refreshed };
+  } catch (error) {
+    return classifyRefreshThrownError(error);
+  } finally {
+    if (locked) {
+      releaseRefreshLock(lockPath);
+    }
+  }
+}
+
+/** Convenience wrapper around {@link refreshGuardianTokenResult}. */
+export async function refreshGuardianToken(
+  gatewayUrl: string,
+  assistantId: string,
+): Promise<GuardianTokenData | null> {
+  const result = await refreshGuardianTokenResult(gatewayUrl, assistantId);
+  return result.ok ? result.token : null;
 }

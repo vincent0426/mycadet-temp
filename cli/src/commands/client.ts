@@ -18,7 +18,7 @@ import { DAEMON_INTERNAL_ASSISTANT_ID, GATEWAY_PORT } from "../lib/constants";
 import {
   refreshGuardianToken,
   guardianTokenDueForRenewal,
-} from "../lib/guardian-token";
+} from "@mycadet/local-mode";
 import { normalizeRuntimeUrl, trustedRefreshUrl } from "../lib/runtime-url";
 import { getGatewayUrl } from "@mycadet/local-mode/contract";
 import {

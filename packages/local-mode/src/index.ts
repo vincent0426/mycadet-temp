@@ -234,10 +234,17 @@ export {
 } from "./remotes/cloud/migrations";
 export {
   getGuardianAccessToken,
+  guardianTokenDueForRenewal,
   isConfidentialRefreshUrl,
+  refreshGuardianToken,
+  refreshGuardianTokenResult,
   saveGuardianToken,
   loadGuardianToken,
 } from "./guardian-token";
-export type { TokenResult, GuardianTokenData } from "./guardian-token";
+export type {
+  TokenResult,
+  GuardianTokenData,
+  GuardianTokenRefreshResult,
+} from "./guardian-token";
 
 export { setLocalSourceRoot } from "./source-root";

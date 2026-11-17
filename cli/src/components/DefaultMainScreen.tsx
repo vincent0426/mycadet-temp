@@ -19,7 +19,7 @@ import { type LockfileAssistant } from "@mycadet/local-mode/contract";
 import {
   guardianTokenDueForRenewal,
   refreshGuardianToken,
-} from "../lib/guardian-token";
+} from "@mycadet/local-mode";
 import { trustedRefreshUrl } from "../lib/runtime-url";
 import { getGatewayUrl } from "@mycadet/local-mode/contract";
 import { appendHistory, loadHistory } from "../lib/input-history";

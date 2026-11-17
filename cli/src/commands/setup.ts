@@ -4,7 +4,7 @@ import {
   type LockfileAssistant,
 } from "@mycadet/local-mode/contract";
 import { cliCommand, loadGuardianToken } from "@mycadet/local-mode";
-import { refreshGuardianToken } from "../lib/guardian-token.js";
+import { refreshGuardianToken } from "@mycadet/local-mode";
 import {
   ensureProviderApiKey,
   formatProviderName,

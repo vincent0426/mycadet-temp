@@ -16,7 +16,7 @@ import { resolveTargetAssistant } from "../assistant-config.js";
 import {
   guardianTokenDueForRenewal,
   refreshGuardianToken,
-} from "../guardian-token.js";
+} from "@mycadet/local-mode";
 import {
   buildTunnelLiveVoiceUrl,
   mintTunnelWsToken,
