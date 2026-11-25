@@ -3,11 +3,12 @@
  * help live here, so parse bugs like #881's help-exits-1 class are the
  * library's problem, not ours.
  *
- * `tunnel` is a real commander tree (its subcommands and flags are declared,
- * and its execute layer lives beside the registration in its module). The
- * other commands are pass-throughs for now: each module still parses its own
- * argv — the entry keeps `process.argv` shaped the way they read it — and
- * each one converts to declared options in its own followup leg.
+ * `tunnel` and `logs` are real commander commands (their arguments and flags
+ * are declared, and the execute layer lives beside the registration in its
+ * module). The other commands are pass-throughs for now: each module still
+ * parses its own argv — the entry keeps `process.argv` shaped the way they
+ * read it — and each one converts to declared options in its own followup
+ * leg.
  */
 
 import { Command } from "commander";
@@ -26,7 +27,7 @@ import { events } from "./commands/events";
 import { exec } from "./commands/exec";
 import { hatch } from "./commands/hatch";
 import { login, logout, whoami } from "./commands/login";
-import { logs } from "./commands/logs";
+import { registerLogsCommand } from "./commands/logs";
 import { message } from "./commands/message";
 import { pair } from "./commands/pair";
 import { ps } from "./commands/ps";
@@ -61,7 +62,6 @@ const PASS_THROUGH_COMMANDS = {
   exec,
   hatch,
   login,
-  logs,
   logout,
   machine,
   message,
@@ -100,6 +100,7 @@ export function buildCadetProgram(): Command {
   });
 
   registerTunnelCommand(program);
+  registerLogsCommand(program);
 
   for (const [name, command] of Object.entries(PASS_THROUGH_COMMANDS)) {
     program
@@ -123,7 +124,7 @@ export function buildCadetProgram(): Command {
     .action(() => {
       const candidates = completeCadet(
         process.argv.slice(3),
-        Object.keys(PASS_THROUGH_COMMANDS).concat("tunnel"),
+        Object.keys(PASS_THROUGH_COMMANDS).concat("tunnel", "logs"),
       );
       console.log(candidates.join("\n"));
       process.exit(0);

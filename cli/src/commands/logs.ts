@@ -4,6 +4,8 @@ import { createInterface } from "readline";
 import { watch } from "fs";
 import { join } from "path";
 
+import { Command, InvalidArgumentError } from "commander";
+
 import { type LockfileAssistant } from "@mycadet/local-mode/contract";
 import { findAssistant } from "@mycadet/local-mode";
 
@@ -19,98 +21,21 @@ import {
 
 interface LogsArgs {
   name?: string;
-  follow: boolean;
+  follow?: boolean;
   tail?: number;
-  timestamps: boolean;
+  timestamps?: boolean;
   since?: string;
   until?: string;
   service?: string;
 }
 
-function printHelp(): void {
-  console.log(`Usage: ${cliCommand()} logs [<name>] [options]`);
-  console.log("");
-  console.log("View logs from an assistant instance.");
-  console.log("");
-  console.log("Arguments:");
-  console.log(
-    "  <name>                Name of the assistant, defaults to latest",
-  );
-  console.log("");
-  console.log("Options:");
-  console.log("  -f, --follow          Follow log output");
-  console.log("  -n, --tail <N>        Show last N lines");
-  console.log("  -t, --timestamps      Show timestamps on each line");
-  console.log(
-    "  --since <time>        Show logs since timestamp or relative, e.g. 10m or 2h",
-  );
-  console.log("  --until <time>        Show logs until timestamp or relative");
-  console.log("  -s, --service <name>  Filter to a specific service");
-  console.log("  -h, --help            Show this help");
-}
-
-function parseArgs(): LogsArgs {
-  const args = process.argv.slice(3);
-  const result: LogsArgs = {
-    follow: false,
-    timestamps: false,
-  };
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--help" || arg === "-h") {
-      printHelp();
-      process.exit(0);
-    } else if (arg === "-f" || arg === "--follow") {
-      result.follow = true;
-    } else if (arg === "-t" || arg === "--timestamps") {
-      result.timestamps = true;
-    } else if (arg === "-n" || arg === "--tail") {
-      const next = args[i + 1];
-      if (!next || next.startsWith("-")) {
-        console.error("Error: --tail requires a numeric value");
-        process.exit(1);
-      }
-      const n = parseInt(next, 10);
-      if (isNaN(n) || n < 0) {
-        console.error("Error: --tail must be a non-negative integer");
-        process.exit(1);
-      }
-      result.tail = n;
-      i++;
-    } else if (arg === "--since") {
-      const next = args[i + 1];
-      if (!next || next.startsWith("-")) {
-        console.error("Error: --since requires a value");
-        process.exit(1);
-      }
-      result.since = next;
-      i++;
-    } else if (arg === "--until") {
-      const next = args[i + 1];
-      if (!next || next.startsWith("-")) {
-        console.error("Error: --until requires a value");
-        process.exit(1);
-      }
-      result.until = next;
-      i++;
-    } else if (arg === "-s" || arg === "--service") {
-      const next = args[i + 1];
-      if (!next || next.startsWith("-")) {
-        console.error("Error: --service requires a value");
-        process.exit(1);
-      }
-      result.service = next;
-      i++;
-    } else if (!arg.startsWith("-") && !result.name) {
-      result.name = arg;
-    } else {
-      console.error(`Error: Unknown argument '${arg}'`);
-      process.exit(1);
-    }
+/** `--tail` takes a non-negative integer. */
+function parseTail(value: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new InvalidArgumentError("Must be a non-negative integer.");
   }
-
-  return result;
+  return n;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -484,56 +409,94 @@ async function showCustomLogs(
 
 // ── Entry point ─────────────────────────────────────────────────
 
+/** The `cadet logs` action: show the logs for the assistant's topology. */
+async function logsFlow(opts: LogsArgs): Promise<void> {
+  const entry = findAssistant(opts.name);
+
+  if (!entry) {
+    if (opts.name) {
+      console.error(`No assistant found with name '${opts.name}'.`);
+    } else {
+      console.error("No assistant found. Run `cadet hatch` first.");
+    }
+    process.exit(1);
+  }
+
+  const cloud = entry.cloud;
+
+  switch (cloud) {
+    case "local":
+      await showLocalLogs(entry, opts);
+      break;
+
+    case "docker":
+      await showDockerLogs(entry, opts);
+      break;
+
+    case "custom":
+      await showCustomLogs(entry, opts);
+      break;
+
+    case "cloud":
+      console.error(
+        "Logs for Cadet Cloud instances are not yet supported.\n" +
+          "View logs in the Cadet Cloud dashboard.",
+      );
+      process.exit(1);
+      break;
+
+    case "apple-container":
+      console.error(
+        "Logs for Apple Container instances are not yet supported.\n" +
+          `Use 'cadet ssh ${entry.assistantId}' to access the container directly.`,
+      );
+      process.exit(1);
+      break;
+
+    default:
+      console.error(`Unsupported topology '${cloud}' for log viewing.`);
+      process.exit(1);
+  }
+}
+
+const DESCRIPTION = "View logs from an assistant instance";
+
+/**
+ * The `cadet logs` command — commander owns the argument and flag parsing;
+ * this module keeps the execute layer.
+ */
+export function registerLogsCommand(program: Command): void {
+  program
+    .command("logs")
+    .description(DESCRIPTION)
+    .argument("[name]", "Name of the assistant, defaults to latest")
+    .option("-f, --follow", "Follow log output")
+    .option("-n, --tail <N>", "Show last N lines", parseTail)
+    .option("-t, --timestamps", "Show timestamps on each line")
+    .option(
+      "--since <time>",
+      "Show logs since timestamp or relative, e.g. 10m or 2h",
+    )
+    .option("--until <time>", "Show logs until timestamp or relative")
+    .option("-s, --service <name>", "Filter to a specific service")
+    .action((name: string | undefined, opts: Omit<LogsArgs, "name">) =>
+      logsFlow({ ...opts, name }),
+    );
+}
+
+/**
+ * Compat runner for the logs suites: the tests set process.argv and call
+ * `logs()` the way the pre-commander entry did. Builds the logs command
+ * standalone and parses the argv after the command word.
+ */
 export const logs = Object.assign(
   async function logs(): Promise<void> {
-    const opts = parseArgs();
-
-    const entry = findAssistant(opts.name);
-
-    if (!entry) {
-      if (opts.name) {
-        console.error(`No assistant found with name '${opts.name}'.`);
-      } else {
-        console.error("No assistant found. Run `cadet hatch` first.");
-      }
-      process.exit(1);
-    }
-
-    const cloud = entry.cloud;
-
-    switch (cloud) {
-      case "local":
-        await showLocalLogs(entry, opts);
-        break;
-
-      case "docker":
-        await showDockerLogs(entry, opts);
-        break;
-
-      case "custom":
-        await showCustomLogs(entry, opts);
-        break;
-
-      case "cloud":
-        console.error(
-          "Logs for Cadet Cloud instances are not yet supported.\n" +
-            "View logs in the Cadet Cloud dashboard.",
-        );
-        process.exit(1);
-        break;
-
-      case "apple-container":
-        console.error(
-          "Logs for Apple Container instances are not yet supported.\n" +
-            `Use 'cadet ssh ${entry.assistantId}' to access the container directly.`,
-        );
-        process.exit(1);
-        break;
-
-      default:
-        console.error(`Unsupported topology '${cloud}' for log viewing.`);
-        process.exit(1);
-    }
+    const program = new Command();
+    program.name(cliCommand());
+    registerLogsCommand(program);
+    await program.parseAsync(["logs", ...process.argv.slice(3)], {
+      from: "user",
+    });
   },
-  { description: "View logs from an assistant instance" },
+  { description: DESCRIPTION },
 );
