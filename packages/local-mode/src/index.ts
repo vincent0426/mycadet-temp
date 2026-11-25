@@ -23,7 +23,10 @@ export {
 export { stageBasetenBuildContext } from "./remotes/baseten/context";
 export { execBasetenSandbox } from "./remotes/baseten/exec";
 export { localExecDirForService } from "./remotes/local/exec";
-export { getGatewayPidPath } from "./remotes/local/instance";
+export {
+  getGatewayPidPath,
+  getLocalInstanceDir,
+} from "./remotes/local/instance";
 export {
   ensureLocalBinShims,
   localRuntimeWebDist,
@@ -158,6 +161,8 @@ export {
   resetLogFile,
   closeLogFile,
   writeToLogFile,
+  RUNTIME_LOG_SERVICES,
+  runtimeLogPath,
 } from "./xdg-log";
 export type { SleepResult } from "./operations/sleep";
 export {

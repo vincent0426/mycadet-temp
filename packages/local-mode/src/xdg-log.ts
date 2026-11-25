@@ -132,15 +132,23 @@ export function pipeToLogFile(
   }
 }
 
+export const RUNTIME_LOG_SERVICES = ["assistant", "gateway"] as const;
+
 /** Runtime output belongs to the instance, alongside its service state. */
+export function runtimeLogPath(
+  instanceDir: string,
+  service: (typeof RUNTIME_LOG_SERVICES)[number],
+): string {
+  return join(instanceDir, "logs", `${service}-stdout.log`);
+}
+
 export function openRuntimeLogFile(
   instanceDir: string,
-  service: "assistant" | "gateway",
+  service: (typeof RUNTIME_LOG_SERVICES)[number],
 ): number | "ignore" {
   try {
-    const dir = join(instanceDir, "logs");
-    mkdirSync(dir, { recursive: true });
-    return openSync(join(dir, `${service}-stdout.log`), "a", 0o600);
+    mkdirSync(join(instanceDir, "logs"), { recursive: true });
+    return openSync(runtimeLogPath(instanceDir, service), "a", 0o600);
   } catch {
     return "ignore";
   }

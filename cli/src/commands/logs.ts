@@ -4,15 +4,20 @@ import { createInterface } from "readline";
 import { watch } from "fs";
 import { join } from "path";
 
-import { type LockfileAssistant } from "@mycadet/local-mode/contract";
+import {
+  type LocalAssistant,
+  type LockfileAssistant,
+} from "@mycadet/local-mode/contract";
 import { findAssistant } from "@mycadet/local-mode";
 
 import {
   cliCommand,
   dockerResourceNames,
   extractHostFromEntry,
-  resolveLogDir,
   execOutput,
+  getLocalInstanceDir,
+  RUNTIME_LOG_SERVICES,
+  runtimeLogPath,
 } from "@mycadet/local-mode";
 
 // ── Arg parsing ─────────────────────────────────────────────────
@@ -168,15 +173,17 @@ function extractServiceTag(line: string): string | null {
 // ── Local topology ──────────────────────────────────────────────
 
 async function showLocalLogs(
-  entry: LockfileAssistant,
+  entry: LocalAssistant,
   opts: LogsArgs,
 ): Promise<void> {
-  const logDir = resolveLogDir();
-  const logFile = join(logDir, "hatch.log");
+  const instanceDir = getLocalInstanceDir(entry);
+  const logFiles = RUNTIME_LOG_SERVICES.map((service) =>
+    runtimeLogPath(instanceDir, service),
+  ).filter((file) => existsSync(file));
 
-  if (!existsSync(logFile)) {
+  if (logFiles.length === 0) {
     console.error(
-      `No log file found at ${logFile}. Has the assistant been started?`,
+      `No log files found in ${join(instanceDir, "logs")}. Has the assistant been started?`,
     );
     process.exit(1);
   }
@@ -212,17 +219,21 @@ async function showLocalLogs(
     return true;
   }
 
-  // Read existing file content
-  const lines: string[] = [];
-  const rl = createInterface({
-    input: createReadStream(logFile, { encoding: "utf-8" }),
-    crlfDelay: Infinity,
-  });
-
-  for await (const line of rl) {
-    if (!matchesFilters(line)) continue;
-    lines.push(line);
+  // Read every file, then merge by timestamp; the sort is stable, so a
+  // line without one keeps its place after the line before it.
+  const timed: { at: number; line: string }[] = [];
+  for (const logFile of logFiles) {
+    let at = 0;
+    const rl = createInterface({
+      input: createReadStream(logFile, { encoding: "utf-8" }),
+      crlfDelay: Infinity,
+    });
+    for await (const line of rl) {
+      at = extractTimestamp(line)?.getTime() ?? at;
+      if (matchesFilters(line)) timed.push({ at, line });
+    }
   }
+  const lines = timed.sort((x, y) => x.at - y.at).map((entry) => entry.line);
 
   // Apply --tail (explicit check for 0 since slice(-0) returns the whole array)
   const output =
@@ -235,45 +246,9 @@ async function showLocalLogs(
     console.log(line);
   }
 
-  // Follow mode: watch for changes
+  // Follow mode: watch every file for changes
   if (opts.follow) {
-    let fileSize = statSync(logFile).size;
-
-    watch(logFile, () => {
-      let newSize: number;
-      try {
-        newSize = statSync(logFile).size;
-      } catch {
-        return;
-      }
-      if (newSize <= fileSize) {
-        fileSize = newSize;
-        return;
-      }
-
-      const stream = createReadStream(logFile, {
-        start: fileSize,
-        encoding: "utf-8",
-      });
-      const followRl = createInterface({
-        input: stream,
-        crlfDelay: Infinity,
-      });
-
-      followRl.on("line", (line: string) => {
-        if (matchesFilters(line)) {
-          console.log(line);
-        }
-      });
-
-      followRl.on("close", () => {
-        try {
-          fileSize = statSync(logFile).size;
-        } catch {
-          // File may have been removed
-        }
-      });
-    });
+    for (const logFile of logFiles) followLogFile(logFile, matchesFilters);
 
     // Keep process alive
     await new Promise<void>((resolve) => {
@@ -285,6 +260,50 @@ async function showLocalLogs(
       });
     });
   }
+}
+
+/** Print the lines appended to a log file from now on. */
+function followLogFile(
+  logFile: string,
+  matchesFilters: (line: string) => boolean,
+): void {
+  let fileSize = statSync(logFile).size;
+
+  watch(logFile, () => {
+    let newSize: number;
+    try {
+      newSize = statSync(logFile).size;
+    } catch {
+      return;
+    }
+    if (newSize <= fileSize) {
+      fileSize = newSize;
+      return;
+    }
+
+    const stream = createReadStream(logFile, {
+      start: fileSize,
+      encoding: "utf-8",
+    });
+    const followRl = createInterface({
+      input: stream,
+      crlfDelay: Infinity,
+    });
+
+    followRl.on("line", (line: string) => {
+      if (matchesFilters(line)) {
+        console.log(line);
+      }
+    });
+
+    followRl.on("close", () => {
+      try {
+        fileSize = statSync(logFile).size;
+      } catch {
+        // File may have been removed
+      }
+    });
+  });
 }
 
 // ── Docker topology ─────────────────────────────────────────────
