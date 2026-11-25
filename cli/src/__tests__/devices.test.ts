@@ -94,6 +94,17 @@ async function runDevices(): Promise<RunResult> {
       errors.push(a.join(" "));
     },
   );
+  // Commander writes help and parse errors straight to the streams.
+  const outSpy = spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    logs.push(String(chunk));
+    return true;
+  });
+  const errWriteSpy = spyOn(process.stderr, "write").mockImplementation(
+    (chunk) => {
+      errors.push(String(chunk));
+      return true;
+    },
+  );
   const exitSpy = spyOn(process, "exit").mockImplementation(((c?: number) => {
     throw new Error(`exit:${c}`);
   }) as never);
@@ -105,6 +116,8 @@ async function runDevices(): Promise<RunResult> {
   } finally {
     logSpy.mockRestore();
     errSpy.mockRestore();
+    outSpy.mockRestore();
+    errWriteSpy.mockRestore();
     exitSpy.mockRestore();
   }
   return { exited, logs: logs.join("\n"), errors: errors.join("\n") };
@@ -185,12 +198,30 @@ describe("cadet devices", () => {
     });
   }
 
-  test("--help prints usage including Examples", async () => {
+  test("--help lists the name, --json, revoke and examples", async () => {
     process.argv = ["bun", "cadet", "devices", "--help"];
     const { logs } = await runDevices();
-    expect(logs).toContain("USAGE:");
-    expect(logs).toContain("EXAMPLES:");
-    expect(logs).toContain("cadet devices revoke");
+    expect(logs).toContain("[name]");
+    expect(logs).toContain("--json");
+    expect(logs).toContain("revoke");
+    expect(logs).toContain("Examples:");
+  });
+
+  test("revoke --help lists its arguments and options", async () => {
+    process.argv = ["bun", "cadet", "devices", "revoke", "--help"];
+    const { logs } = await runDevices();
+    expect(logs).toContain("<hashedDeviceId>");
+    expect(logs).toContain("--yes");
+    expect(logs).toContain("--json");
+  });
+
+  test("an unknown option is refused instead of ignored", async () => {
+    seedLocal("unknown-flag");
+    process.argv = ["bun", "cadet", "devices", "unknown-flag", "--jsno"];
+    const { exited, errors } = await runDevices();
+    expect(exited).toBe(true);
+    expect(errors).toContain("unknown option '--jsno'");
+    expect(gatewayCalls).toHaveLength(0);
   });
 
   test("lists active devices from the gateway's devices command", async () => {
@@ -378,7 +409,7 @@ describe("cadet devices", () => {
     const { exited, errors } = await runDevices();
 
     expect(exited).toBe(true);
-    expect(errors).toContain("hashedDeviceId is required");
+    expect(errors).toContain("missing required argument 'hashedDeviceId'");
     expect(gatewayCalls).toHaveLength(0);
   });
 

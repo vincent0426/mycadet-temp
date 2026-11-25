@@ -12,7 +12,10 @@
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 
+import { Command } from "commander";
+
 import {
+  cliCommand,
   DeviceRecord,
   getAssistantDisplayName,
   findAssistant,
@@ -29,37 +32,10 @@ import {
 } from "@mycadet/local-mode/contract";
 import type { GuardianTokenData } from "@mycadet/local-mode";
 import { computeDeviceId } from "@mycadet/local-mode";
-import { parseAssistantTargetArg } from "../lib/assistant-target-args.js";
 import {
   canPromptForConfirmation,
   confirmAction,
 } from "../lib/confirm-action.js";
-
-function printUsage(): void {
-  console.log(`cadet devices - List and revoke devices paired to a local assistant
-
-USAGE:
-    cadet devices [name]
-    cadet devices revoke <hashedDeviceId> [name] [--yes]
-
-ARGUMENTS:
-    [name]              Name or id of the local assistant (defaults to the active/sole one)
-    <hashedDeviceId>    The device's hashed id (copy it from the list output)
-
-OPTIONS:
-    --yes              Skip the interactive confirmation prompt when revoking (for automation)
-    --json             Print machine-readable JSON on stdout (revoke requires --yes)
-
-Lists the devices paired to a local (host-side) assistant, or revokes one by its
-hashed id. Runs on the machine that hosts the assistant.
-
-EXAMPLES:
-    cadet devices
-    cadet devices my-desk
-    cadet devices revoke 3f9a1c...
-    cadet devices revoke 3f9a1c... my-desk --yes
-`);
-}
 
 type HostAssistant = LocalAssistant | DockerAssistant;
 
@@ -271,58 +247,91 @@ async function revokeDevice(
   );
 }
 
+/** Find the named (or active) assistant and require it to be hosted here, or exit. */
+function resolveHostAssistant(nameArg: string | undefined): HostAssistant {
+  const entry = findAssistant(nameArg);
+  if (!entry) {
+    console.error(
+      nameArg
+        ? `No assistant found with name or ID '${nameArg}'.`
+        : "No assistant found. Run 'cadet hatch' first.",
+    );
+    process.exit(1);
+  }
+  return requireHostAssistant(entry);
+}
+
+const DESCRIPTION = "List or revoke devices paired to a local assistant";
+const NAME_HELP =
+  "Name or id of the local assistant, defaults to the active one";
+
+export function registerDevicesCommand(program: Command): void {
+  const devicesCommand = program
+    .command("devices")
+    .description(DESCRIPTION)
+    .argument("[name]", NAME_HELP)
+    .option("--json", "Print machine-readable JSON on stdout")
+    .addHelpText(
+      "after",
+      `
+Lists the devices paired to a local or Docker assistant, or revokes one by its
+hashed id. Runs on the machine that hosts the assistant.
+
+Examples:
+  $ ${cliCommand()} devices
+  $ ${cliCommand()} devices my-desk
+  $ ${cliCommand()} devices revoke 3f9a1c...
+  $ ${cliCommand()} devices revoke 3f9a1c... my-desk --yes`,
+    )
+    .action(async (name: string | undefined, opts: { json?: boolean }) => {
+      await listDevices(resolveHostAssistant(name), opts.json ?? false);
+    });
+
+  devicesCommand
+    .command("revoke")
+    .description("Revoke a paired device by its hashed id")
+    .argument(
+      "<hashedDeviceId>",
+      "The device's hashed id (copy it from the list output)",
+    )
+    .argument("[name]", NAME_HELP)
+    .option("--yes", "Skip the confirmation prompt (for automation)")
+    .option("--json", "Print machine-readable JSON on stdout (requires --yes)")
+    .action(
+      async (
+        hashedDeviceId: string,
+        name: string | undefined,
+        _opts: unknown,
+        command: Command,
+      ) => {
+        // `devices` declares --json too and claims it wherever it appears.
+        const opts = command.optsWithGlobals<{
+          yes?: boolean;
+          json?: boolean;
+        }>();
+        await revokeDevice(
+          resolveHostAssistant(name),
+          hashedDeviceId,
+          opts.yes ?? false,
+          opts.json ?? false,
+        );
+      },
+    );
+}
+
+/**
+ * Compat runner for the devices suites: the tests set process.argv and call
+ * `devices()` the way the pre-commander entry did. Builds the devices
+ * command standalone and parses the argv after the command word.
+ */
 export const devices = Object.assign(
   async function devices(): Promise<void> {
-    const rawArgs = process.argv.slice(3);
-
-    if (rawArgs.includes("--help") || rawArgs.includes("-h")) {
-      printUsage();
-      return;
-    }
-
-    const jsonOutput = rawArgs.includes("--json");
-    const args = rawArgs.filter((a) => a !== "--json");
-
-    if (args[0] === "revoke") {
-      const rest = args.slice(1);
-      const yes = rest.includes("--yes");
-      const positionals = rest.filter((a) => !a.startsWith("-"));
-      const hashedDeviceId = positionals[0];
-      if (!hashedDeviceId) {
-        console.error("Error: a hashedDeviceId is required to revoke.");
-        printUsage();
-        process.exit(1);
-      }
-      const nameArg = positionals.slice(1).join(" ") || undefined;
-      const entry = findAssistant(nameArg);
-      if (!entry) {
-        console.error(
-          nameArg
-            ? `No assistant found with name or ID '${nameArg}'.`
-            : "No assistant found. Run 'cadet hatch' first.",
-        );
-        process.exit(1);
-      }
-      await revokeDevice(
-        requireHostAssistant(entry),
-        hashedDeviceId,
-        yes,
-        jsonOutput,
-      );
-      return;
-    }
-
-    const nameArg = parseAssistantTargetArg(args, []);
-    const entry = findAssistant(nameArg);
-    if (!entry) {
-      console.error(
-        nameArg
-          ? `No assistant found with name or ID '${nameArg}'.`
-          : "No assistant found. Run 'cadet hatch' first.",
-      );
-      process.exit(1);
-    }
-    await listDevices(requireHostAssistant(entry), jsonOutput);
+    const program = new Command();
+    program.name(cliCommand());
+    registerDevicesCommand(program);
+    await program.parseAsync(["devices", ...process.argv.slice(3)], {
+      from: "user",
+    });
   },
-  { description: "List or revoke devices paired to a local assistant" },
+  { description: DESCRIPTION },
 );
